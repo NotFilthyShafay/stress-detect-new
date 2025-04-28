@@ -1,0 +1,31 @@
+# Dataset files
+Stress-main/MAS
+*.mp4
+*.mp4.part
+*.wav
+Stress-main/processed_data
+Stress-main/results
+Stress-main/wav2vec2_checkpoints
+
+wav2vec2_checkpoints
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+venv/
+ENV/
+
+# Model files (if large)
+*.pth
+*.h5
+*.model
+
+# Results
+results/
+
+# Misc
+.DS_Store
+Stress-main/detectors/models/tf_hub_cache

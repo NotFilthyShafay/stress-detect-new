@@ -1,0 +1,372 @@
+import os
+import argparse
+import torch
+import numpy as np
+import json
+import logging
+from collections import OrderedDict
+import time
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("stress_prediction")
+
+# Import from our modules
+from inference import infer
+
+# Neural Network model architecture (must match the saved model)
+class MultimodalMLP(torch.nn.Module):
+    def __init__(self, input_size, hidden_size=256, num_classes=2, dropout_rate=0.3, depth='very_deep'):
+        super(MultimodalMLP, self).__init__()
+        
+        layers = []
+        
+        # Input layer
+        layers.append(torch.nn.Linear(input_size, hidden_size))
+        layers.append(torch.nn.ReLU())
+        layers.append(torch.nn.Dropout(dropout_rate))
+        
+        if depth == 'very_deep':
+            # Add five more hidden layers with decreasing sizes
+            hidden_sizes = [hidden_size, hidden_size // 2, hidden_size // 2, hidden_size // 4, hidden_size // 4, hidden_size // 8]
+            
+            for i in range(1, len(hidden_sizes)):
+                layers.append(torch.nn.Linear(hidden_sizes[i-1], hidden_sizes[i]))
+                layers.append(torch.nn.ReLU())
+                layers.append(torch.nn.Dropout(dropout_rate))
+            
+            # Output layer
+            layers.append(torch.nn.Linear(hidden_sizes[-1], num_classes))
+        elif depth == 'deep':
+            # Add three more hidden layers with decreasing sizes
+            hidden_sizes = [hidden_size, hidden_size // 2, hidden_size // 4]
+            
+            for i in range(1, len(hidden_sizes)):
+                layers.append(torch.nn.Linear(hidden_sizes[i-1], hidden_sizes[i]))
+                layers.append(torch.nn.ReLU())
+                layers.append(torch.nn.Dropout(dropout_rate))
+            
+            # Output layer
+            layers.append(torch.nn.Linear(hidden_sizes[-1], num_classes))
+        else:
+            # Simple architecture (as in original code)
+            layers.append(torch.nn.Linear(hidden_size, hidden_size // 2))
+            layers.append(torch.nn.ReLU())
+            layers.append(torch.nn.Dropout(dropout_rate))
+            layers.append(torch.nn.Linear(hidden_size // 2, num_classes))
+        
+        self.model = torch.nn.Sequential(*layers)
+    
+    def forward(self, x):
+        return self.model(x)
+
+
+def load_model(model_path, input_size=None, hidden_size=256, depth='very_deep'):
+    """Load the trained model from the given path."""
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    
+    logger.info(f"Using device: {device}")
+    
+    # Initialize model
+    model = MultimodalMLP(input_size, hidden_size, depth=depth)
+    
+    # Check if model file exists
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model file not found: {model_path}")
+    
+    try:
+        # Load state dict
+        state_dict = torch.load(model_path, map_location=device)
+        
+        # If loaded from newer PyTorch version, might need to remove 'module.' prefix
+        if list(state_dict.keys())[0].startswith('module.'):
+            logger.info("Detected 'module.' prefix in state dict keys, removing...")
+            new_state_dict = OrderedDict()
+            for k, v in state_dict.items():
+                name = k[7:] if k.startswith('module.') else k
+                new_state_dict[name] = v
+            state_dict = new_state_dict
+        
+        model.load_state_dict(state_dict)
+        model = model.to(device)
+        model.eval()
+        logger.info(f"Model successfully loaded from {model_path}")
+        
+    except Exception as e:
+        logger.error(f"Error loading model: {str(e)}")
+        raise
+    
+    return model, device
+
+
+def load_feature_order(feature_order_path):
+    """Load feature order from JSON file with proper error handling."""
+    feature_order = None
+    
+    if not feature_order_path:
+        logger.warning("No feature order path provided, will use alphabetical ordering")
+        return None
+    
+    if not os.path.exists(feature_order_path):
+        logger.warning(f"Feature order file not found: {feature_order_path}")
+        return None
+    
+    try:
+        with open(feature_order_path, 'r') as f:
+            feature_order = json.load(f)
+        
+        # Validate feature order is a list
+        if not isinstance(feature_order, list):
+            logger.error(f"Feature order file should contain a list, found {type(feature_order)}")
+            return None
+        
+        if len(feature_order) == 0:
+            logger.warning("Feature order list is empty")
+            return None
+        
+        logger.info(f"Loaded feature order with {len(feature_order)} features")
+        return feature_order
+    
+    except json.JSONDecodeError:
+        logger.error(f"Invalid JSON in feature order file: {feature_order_path}")
+        return None
+    except Exception as e:
+        logger.error(f"Error loading feature order: {str(e)}")
+        return None
+
+
+def prepare_features(features, feature_order=None):
+    """Prepare features for model inference with improved error handling."""
+    # If feature_order is provided, use it to ensure correct order
+    if feature_order:
+        logger.info(f"Using provided feature order with {len(feature_order)} features")
+        ordered_features = []
+        missing_features = []
+        
+        for feat in feature_order:
+            if feat in features:
+                ordered_features.append(float(features[feat]))
+            else:
+                missing_features.append(feat)
+                ordered_features.append(0.0)  # Default value for missing features
+        
+        if missing_features:
+            logger.warning(f"Missing {len(missing_features)} features from input: {missing_features[:5]}...")
+        
+        logger.info(f"Prepared {len(ordered_features)} features using provided feature order")
+        return ordered_features
+    
+    # Otherwise, sort features by key to ensure consistent ordering
+    logger.info("No feature order provided, using alphabetical ordering")
+    # Remove non-numeric keys like 'video_file' if present
+    numeric_features = {}
+    for k, v in features.items():
+        if k != 'video_file' and k != 'label':
+            try:
+                numeric_features[k] = float(v)
+            except (ValueError, TypeError):
+                logger.warning(f"Skipping non-numeric feature: {k}={v}")
+    
+    # Sort by key to maintain consistent order
+    ordered_dict = OrderedDict(sorted(numeric_features.items()))
+    feature_values = list(ordered_dict.values())
+    logger.info(f"Prepared {len(feature_values)} features using alphabetical ordering")
+    logger.debug(f"Feature names: {list(ordered_dict.keys())}")
+    
+    return feature_values
+
+
+def predict_stress(
+    video_path, 
+    model_path, 
+    feature_order_path=None, 
+    hidden_size=256, 
+    depth='very_deep', 
+    silent=False
+):
+    """
+    Process a video and predict stress using the saved model.
+    
+    Args:
+        video_path: Path to the video file
+        model_path: Path to the saved model file (.pth)
+        feature_order_path: Optional path to JSON file with feature order
+        hidden_size: Hidden layer size for the model
+        depth: Model architecture depth ('very_deep', 'deep', or 'shallow')
+        silent: Whether to suppress output
+        
+    Returns:
+        Dict with prediction results
+    """
+    if silent:
+        logger.setLevel(logging.WARNING)
+    else:
+        logger.setLevel(logging.INFO)
+    
+    # Check if video file exists
+    if not os.path.exists(video_path):
+        logger.error(f"Video file not found: {video_path}")
+        raise FileNotFoundError(f"Video file not found: {video_path}")
+    
+    # Load feature order
+    feature_order = load_feature_order(feature_order_path)
+    
+    # Extract features from video
+    logger.info(f"Extracting features from {video_path}...")
+    try:
+        features = infer(video_path, silent=silent)
+        logger.info(f"Extracted {len(features)} raw features")
+    except Exception as e:
+        logger.error(f"Error extracting features: {str(e)}")
+        raise
+    
+    # Prepare features for model
+    feature_values = prepare_features(features, feature_order)
+    
+    # Determine input size from features
+    input_size = len(feature_values)
+    if input_size == 0:
+        logger.error("No valid features extracted from video")
+        raise ValueError("No valid features extracted from video")
+    
+    # Load model
+    logger.info(f"Loading model from {model_path}...")
+    model, device = load_model(model_path, input_size, hidden_size, depth)
+    
+    # Convert features to tensor
+    try:
+        input_tensor = torch.FloatTensor([feature_values]).to(device)
+    except Exception as e:
+        logger.error(f"Error converting features to tensor: {str(e)}")
+        raise
+    
+    # Get prediction
+    try:
+        with torch.no_grad():
+            outputs = model(input_tensor)
+            probabilities = torch.nn.functional.softmax(outputs, dim=1)
+            confidence, prediction = torch.max(probabilities, 1)
+    except Exception as e:
+        logger.error(f"Error during inference: {str(e)}")
+        raise
+    
+    # Get results
+    pred_class = prediction.item()
+    stress_confidence = probabilities[0][1].item()  # Probability of stress class
+    no_stress_confidence = probabilities[0][0].item()  # Probability of no stress class
+    
+    # Create result dictionary
+    result = {
+        'prediction': 'stress' if pred_class == 1 else 'no stress',
+        'prediction_label': pred_class,
+        'stress_confidence': stress_confidence,
+        'no_stress_confidence': no_stress_confidence,
+        'features_extracted': len(feature_values)
+    }
+    
+    logger.info("\nPrediction Results:")
+    logger.info(f"Prediction: {result['prediction']} (Label: {result['prediction_label']})")
+    logger.info(f"Confidence: Stress={stress_confidence:.4f}, No Stress={no_stress_confidence:.4f}")
+    logger.info(f"Features extracted: {len(feature_values)}")
+    print(json.dumps(result))  # Print a single line JSON without indentation
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Run stress prediction on a video file")
+    parser.add_argument("video_path", help="Path to the video file")
+    parser.add_argument(
+        "--model_path", 
+        type=str, 
+        default="models/mlp_model.pth", 
+        help="Path to the saved model (.pth file)"
+    )
+    parser.add_argument(
+        "--feature_order", 
+        type=str, 
+        default=None,
+        help="Path to JSON file with feature order (optional)"
+    )
+    parser.add_argument(
+        "--hidden_size", 
+        type=int, 
+        default=256,
+        help="Hidden layer size used in the model"
+    )
+    parser.add_argument(
+        "--depth", 
+        type=str, 
+        default="very_deep",
+        choices=["very_deep", "deep", "shallow"],
+        help="Model architecture depth"
+    )
+    parser.add_argument(
+        "--output", 
+        type=str, 
+        default=None,
+        help="Path to save prediction results as JSON"
+    )
+    parser.add_argument(
+        "--log_level", 
+        type=str, 
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Set logging level"
+    )
+    parser.add_argument(
+        "--quiet", 
+        action="store_true",
+        help="Suppress all output except final results"
+    )
+    args = parser.parse_args()
+    
+    # Set logging level
+    if args.quiet:
+        logger.setLevel(logging.ERROR)
+    else:
+        logger.setLevel(getattr(logging, args.log_level))
+    
+    try:
+        # Run prediction
+        start_time = time.time()
+        result = predict_stress(
+            args.video_path,
+            args.model_path,
+            args.feature_order,
+            args.hidden_size,
+            args.depth,
+            args.quiet
+        )
+        end_time = time.time()
+        inference_time = end_time - start_time
+    
+        # Print results
+        print(f"\nPrediction result: {result}")
+        print(f"Total inference time: {inference_time:.2f} seconds")    
+        # Print the result
+        if not args.quiet:
+            print(json.dumps(result, indent=2))
+        
+        # Save results if output path specified
+        if args.output:
+            os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
+            with open(args.output, "w") as f:
+                json.dump(result, f, indent=2)
+            if not args.quiet:
+                logger.info(f"Results saved to: {args.output}")
+        
+        return result
+    
+    except Exception as e:
+        logger.error(f"Error during prediction: {str(e)}")
+        if not args.quiet:
+            import traceback
+            traceback.print_exc()
+        return {"error": str(e)}
+
+
+if __name__ == "__main__":
+    main()
