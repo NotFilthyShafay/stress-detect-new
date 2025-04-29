@@ -1,0 +1,35 @@
+{
+  "face": {
+    "angry_face": 0.03181818181818182,
+    "disgust_face": 0.0009090909090909091,
+    "fear_face": 0.024545454545454547,
+    "happy_face": 0.2281818181818182,
+    "sad_face": 0.14363636363636365,
+    "surprise_face": 0.03090909090909091,
+    "neutral_face": 0.5354545454545454,
+    "face_offscreen_ratio_face": 0.0
+  },
+  "audio": {
+    "sadness_audio_audio": 0.5925361514091492,
+    "joy_audio_audio": 0.0022019408643245697,
+    "love_audio_audio": 0.0008583369199186563,
+    "anger_audio_audio": 0.40157604217529297,
+    "fear_audio_audio": 0.0023491084575653076,
+    "surprise_audio_audio": 0.00047836583689786494,
+    "speech_rate_audio_audio": 2.9459901800327333
+  },
+  "prosodic": {
+    "neu_prosodic_prosodic": 1.0,
+    "hap_prosodic_prosodic": 9.470303014014192e-12,
+    "sad_prosodic_prosodic": 7.351361273194579e-13,
+    "ang_prosodic_prosodic": 3.2358229429263474e-09
+  },
+  "fidget": {
+    "movement_score_fidget": 0.32606321573257446,
+    "fidget_percentage_fidget": 0.6521264314651489,
+    "hand_movement_fidget": 0.2608505725860596,
+    "face_movement_fidget": 0.16303160786628723,
+    "arm_movement_fidget": 0.293456894159317,
+    "overall_intensity_fidget": 0.39127585887908933
+  }
+}

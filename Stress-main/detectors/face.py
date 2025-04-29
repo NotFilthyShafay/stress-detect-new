@@ -6,7 +6,6 @@ This file defines the `FaceNode` class, which is used for facial emotion recogni
 import os
 from fer import FER
 from fer.utils import draw_annotations
-import torch
 import cv2
 import tensorflow as tf
 from typing import List, Tuple, Dict, Optional
@@ -42,10 +41,16 @@ class FaceNode:
         Args:
             memory_length (int): Number of frames of face data to remember.
         """
-        # Initialize FER detector - removed the device parameter as it's not supported
-        self.detector = FER(mtcnn=False)
+        # GPU detection and configuration for PyTorch
+        import torch
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f"FaceNode using device: {self.device}")
+        
+        # Initialize the detector
+        self.detector = FER(mtcnn=True)
+        # Store the memory length
         self.memory_length = memory_length
-        self.faces: List[List[Dict[str, float]]] = []  # List to store detected faces and their emotions
+        self.faces_memory = []
 
     def recognize_face(self, frame: cv2.Mat) -> List[Dict[str, Dict[str, float]]]:
         """
@@ -66,9 +71,9 @@ class FaceNode:
         faces = self.detector.detect_emotions(frame)
         
         # Append detected faces and emotions to memory
-        self.faces.append(faces)
-        if len(self.faces) > self.memory_length:
-            self.faces.pop(0)
+        self.faces_memory.append(faces)
+        if len(self.faces_memory) > self.memory_length:
+            self.faces_memory.pop(0)
         
         return faces
 
@@ -81,14 +86,14 @@ class FaceNode:
         """
         for frame in frames:
             if frame is None or frame.size == 0:
-                self.faces.append([])
+                self.faces_memory.append([])
                 continue
             
             # Detect faces and emotions in each frame
             faces = self.detector.detect_emotions(frame)
-            self.faces.append(faces)
-            if len(self.faces) > self.memory_length:
-                self.faces.pop(0)
+            self.faces_memory.append(faces)
+            if len(self.faces_memory) > self.memory_length:
+                self.faces_memory.pop(0)
 
     def get_avg_emotions(self) -> Dict[str, float]:
         """
@@ -101,7 +106,7 @@ class FaceNode:
         emo_dic: Dict[str, float] = {}
         mean_denominator = 0
 
-        for frame in self.faces:
+        for frame in self.faces_memory:
             for face in frame:
                 mean_denominator += 1
                 for emotion, score in face['emotions'].items():
@@ -120,9 +125,9 @@ class FaceNode:
         """
         Clears the node's memory of detected faces and emotions.
         """
-        self.faces = []
+        self.faces_memory = []
 
-    def analyze(self, video_path: str, frame_sample_rate: int = 5) -> Tuple[Dict[str, float], float]:
+    def analyze(self, video_path: str, frame_sample_rate: int = 5) -> Dict[str, float]:
         """
         Analyzes a sequence of frames for facial emotions and calculates the percentage of frames with no detected faces.
         Uses batch processing for better GPU utilization.
@@ -132,7 +137,7 @@ class FaceNode:
             frame_sample_rate (int): Process every nth frame (default: 5 = process every 5th frame)
 
         Returns:
-            Tuple[Dict[str, float], float]: A dictionary of average emotion scores and the percentage of frames without detected faces.
+            Dict[str, float]: A dictionary of average emotion scores and the percentage of frames without detected faces.
         """
         self.clear_memory()
         start_time = time.time()
@@ -142,7 +147,7 @@ class FaceNode:
         # Check if the video was opened successfully
         if not video.isOpened():
             print("Error: Could not open video.")
-            return {}, 0.0
+            return {}
 
         # Read frames at specified sample rate
         frames = []
@@ -159,7 +164,7 @@ class FaceNode:
         video.release()
 
         if not frames:
-            return {}, 0.0
+            return {}
             
         # Process frames in batches for better GPU utilization
         batch_size = 16  # Adjust based on your GPU memory
@@ -175,8 +180,8 @@ class FaceNode:
                 self.recognize_faces_batch(batch)
                 # Count empty frames in this batch
                 for j in range(len(batch)):
-                    idx = min(i+j, len(self.faces)-1)
-                    if not self.faces[idx]:
+                    idx = min(i+j, len(self.faces_memory)-1)
+                    if not self.faces_memory[idx]:
                         empty_frames += 1
             except Exception as e:
                 print(f"Error processing batch starting at frame {i}: {e}")
@@ -188,7 +193,18 @@ class FaceNode:
         end_time = time.time()
         print(f"Analysis completed in {end_time - start_time:.2f} seconds")
         
-        return avg_emotions, off_screen_percent
+        # Return as dictionary instead of tuple
+        result = {
+            "angry_face": avg_emotions.get("angry", 0),
+            "disgust_face": avg_emotions.get("disgust", 0),
+            "fear_face": avg_emotions.get("fear", 0),
+            "happy_face": avg_emotions.get("happy", 0),
+            "sad_face": avg_emotions.get("sad", 0),
+            "surprise_face": avg_emotions.get("surprise", 0),
+            "neutral_face": avg_emotions.get("neutral", 0),
+            "face_offscreen_ratio_face": off_screen_percent
+        }
+        return result
 
     def process(self, video_path: str) -> Dict[str, float]:
         """
@@ -200,10 +216,7 @@ class FaceNode:
         Returns:
             Dict[str, float]: Flattened dictionary of features.
         """
-        avg_emotions, off_screen_percent = self.analyze(video_path)
-        result = {f"{emotion}": score for emotion, score in avg_emotions.items()}
-        result["face_offscreen_ratio"] = off_screen_percent
-        return result
+        return self.analyze(video_path)
 
 
 if __name__=='__main__':

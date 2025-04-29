@@ -4,48 +4,53 @@ import concurrent.futures
 import warnings
 import logging
 import sys
+from typing import Dict, Any
 from face import FaceNode
 from audio import AudioNode
 from prosodic import ProsodicNode
 from fidget import FidgetNode
 
-def run_node(node, video_path, silent=False):
-    """Run a single node's processing safely with error handling."""
+logger = logging.getLogger(__name__)
+
+def process_node(node_type, node, video_path, silent):
+    """Process a single node and return its features."""
     try:
-        return node.process(video_path)
+        result = node.process(video_path)
+        # Prefix features to match training
+        return {f"{k}_{node_type}": v for k, v in result.items()}
     except Exception as e:
-        if not silent:
-            print(f"Error in {node.__class__.__name__} for {video_path}: {e}")
+        logging.error(f"Error in {node_type} node: {str(e)}")
         return {}
 
 def infer(video_path, silent=False):
-    """Process a video using all nodes in parallel and return combined features."""
-    # Instantiate all nodes
+    """Extract features from video using all nodes in parallel."""
+    # Initialize nodes
     face_node = FaceNode()
     audio_node = AudioNode()
     prosodic_node = ProsodicNode()
     fidget_node = FidgetNode()
     
-    if not silent:
-        print(f"Processing video: {video_path}")
+    all_features = {}
     
-    # Run all nodes in parallel
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = {
-            "face": executor.submit(run_node, face_node, video_path, silent),
-            "audio": executor.submit(run_node, audio_node, video_path, silent),
-            "prosodic": executor.submit(run_node, prosodic_node, video_path, silent),
-            "fidget": executor.submit(run_node, fidget_node, video_path, silent),
-        }
-        results = {name: future.result() for name, future in futures.items()}
-
-    # Combine all features with appropriate prefixes
-    combined_features = {}
-    for name, features in results.items():
-        for k, v in features.items():
-            combined_features[f"{k}_{name}"] = v
-            
-    return combined_features
+    # Define node processing tasks
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        # Submit all tasks
+        future_face = executor.submit(lambda: process_node("face", face_node, video_path, silent))
+        future_audio = executor.submit(lambda: process_node("audio", audio_node, video_path, silent))
+        future_prosodic = executor.submit(lambda: process_node("prosodic", prosodic_node, video_path, silent))
+        future_fidget = executor.submit(lambda: process_node("fidget", fidget_node, video_path, silent))
+        
+        # Collect results
+        for future, name in [(future_face, "face"), (future_audio, "audio"), 
+                             (future_prosodic, "prosodic"), (future_fidget, "fidget")]:
+            try:
+                features = future.result()
+                all_features.update(features)
+                logging.info(f"Completed {name} node")
+            except Exception as e:
+                logging.error(f"Error in {name} node: {str(e)}")
+    
+    return all_features
 
 def main():
     # Suppress warnings

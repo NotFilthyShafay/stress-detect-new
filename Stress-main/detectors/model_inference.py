@@ -16,6 +16,10 @@ logger = logging.getLogger("stress_prediction")
 
 # Import from our modules
 from inference import infer
+from face import FaceNode
+from audio import AudioNode
+from prosodic import ProsodicNode
+from fidget import FidgetNode
 
 # Neural Network model architecture (must match the saved model)
 class MultimodalMLP(torch.nn.Module):
@@ -214,17 +218,56 @@ def predict_stress(
     # Load feature order
     feature_order = load_feature_order(feature_order_path)
     
-    # Extract features from video
-    logger.info(f"Extracting features from {video_path}...")
-    try:
-        features = infer(video_path, silent=silent)
-        logger.info(f"Extracted {len(features)} raw features")
-    except Exception as e:
-        logger.error(f"Error extracting features: {str(e)}")
-        raise
+    # Process video with nodes
+    face_node = FaceNode()
+    audio_node = AudioNode()
+    prosodic_node = ProsodicNode()
+    fidget_node = FidgetNode()
+
+    node_outputs = {
+        "face": face_node.process(video_path),
+        "audio": audio_node.process(video_path),
+        "prosodic": prosodic_node.process(video_path),
+        "fidget": fidget_node.process(video_path)
+    }
+
+    # FLATTEN the nested structure
+    features = {}
+    for node_features in node_outputs.values():
+        features.update(node_features)
+    
+    # Save the flattened features too
+    with open("debug_flattened_features.json", "w") as f:
+        json.dump(features, f, indent=2)
+
+    # Now 'features' contains all node outputs in a flat structure
+    # with keys like "angry_face", "sadness_audio_audio", etc.
+    logger.info(f"Extracted {len(features)} raw features")
     
     # Prepare features for model
     feature_values = prepare_features(features, feature_order)
+    
+    # Load and apply the same scaler used during training
+    import joblib
+    scaler_path = os.path.join(os.path.dirname(feature_order_path), 'scaler.pkl')
+    if os.path.exists(scaler_path):
+        logger.info(f"Loading scaler from {scaler_path}")
+        scaler = joblib.load(scaler_path)
+        # Reshape for scaler (expects 2D array)
+        feature_values_scaled = scaler.transform([feature_values])[0]
+        logger.info("Features scaled using saved scaler")
+        
+        # Optional debugging to see the difference
+        if not silent:
+            logger.info("Sample before scaling: " + 
+                       str([f"{x:.4f}" for x in feature_values[:3]]))
+            logger.info("Sample after scaling: " + 
+                       str([f"{x:.4f}" for x in feature_values_scaled[:3]]))
+        
+        # Use scaled features
+        feature_values = feature_values_scaled
+    else:
+        logger.warning(f"Scaler not found at {scaler_path}. Using unscaled features!")
     
     # Determine input size from features
     input_size = len(feature_values)

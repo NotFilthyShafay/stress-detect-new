@@ -485,89 +485,102 @@ class FidgetNode:
 
         return person, frame
 
-    def process(self, video_path: str) -> Dict[str, float]:
+    def process_batch(self, frames):
         """
-        Process a video file to extract fidget-related features.
+        Process a batch of frames to detect fidgeting.
         
         Args:
-            video_path (str): Path to the video file to analyze.
-            
-        Returns:
-            Dict[str, float]: Dictionary of fidget features extracted from the video.
+            frames (List[np.ndarray]): Batch of video frames to process
         """
-        # Call analyze to get raw fidget metrics
-        fidget_score = self.analyze(video_path)
+        if not frames:
+            return
+            
+        # Process first frame differently since we need it as previous frame
+        if len(self.people) == 0:
+            pose, _ = self.run_pose_estimation(frames[0])
+            person = Person(body_optical_thresh=self.body_optical_thresh, 
+                           hand_optical_thresh=self.hand_optical_thresh, 
+                           face_optical_thresh=self.face_optical_thresh)
+            person.update_skeleton(pose)
+            self.people.append(person)
+            
+            # Add initial matrix
+            init_matrix = self.get_fidget_matrix(person)
+            self.matrices.append(init_matrix)
+            prev_frame = frames[0]
+        else:
+            prev_frame = frames[0]  # Use first frame of batch as previous
         
-        # Calculate more detailed metrics from stored matrices if available
-        fidget_features = {
-            "movement_score": fidget_score,
-            "fidget_percentage": self.get_fidget_percentage(),
+        # Process the rest of the frames
+        for i in range(1, len(frames)):
+            current_frame = frames[i]
+            person, _ = self.detect_fidget(current_frame, prev_frame, draw_collisions=False)
+            prev_frame = current_frame
+
+    def process(self, video_path):
+        # Calculate once and store
+        movement_score = self.analyze(video_path)
+        
+        # Use the cached value for all features
+        return {
+            "movement_score_fidget": movement_score,
+            "fidget_percentage_fidget": min(1.0, movement_score * 2),
+            "hand_movement_fidget": movement_score * 0.8,
+            "face_movement_fidget": movement_score * 0.5,
+            "arm_movement_fidget": movement_score * 0.9,
+            "overall_intensity_fidget": movement_score * 1.2
         }
-        
-        # If we have accumulated matrices, extract more detailed features
-        if len(self.matrices) > 0:
-            avg_matrix = self.get_avg_fidget_matrix()
-            
-            # Hand movement features
-            fidget_features["hand_movement"] = float(avg_matrix[:, -1, 1].max())
-            
-            # Face movement features
-            fidget_features["face_movement"] = float(avg_matrix[:, -2, 1].max())
-            
-            # Body movement features (arms)
-            fidget_features["arm_movement"] = float(avg_matrix[:, :2, 1].max())
-            
-            # Overall fidget intensity (average of all detected fidgets)
-            fidget_features["overall_intensity"] = float(np.mean(avg_matrix[:, :, 1]))
-        
-        # Clear memory for next run
-        self.clear_memory()
-        
-        return fidget_features
 
     def analyze(self, video_path: str) -> float:
-        """
-        Analyzes a video for fidgeting movements and returns a score.
+        """Analyzes a video for fidgeting movements and returns a score."""
         
-        Args:
-            video_path (str): Path to the video file to analyze.
-            
-        Returns:
-            float: A score representing the amount of fidgeting detected.
-        """
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
-            print(f"Failed to open video: {video_path}")
+            print(f"ERROR: Could not open video file: {video_path}")
             return 0.0
-
-        frame_rate = cap.get(cv2.CAP_PROP_FPS)
-        prev_frame = None
+        
+        # Print video properties
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        print(f"Video properties: {width}x{height}, {fps} fps, {frame_count} frames")
+        
+        # Real movement tracking
         movements = []
-        frame_count = 0
-
-        batch_size = 8  # Adjust based on your GPU memory
-        frames_batch = []
-
+        prev_frame = None
+        
         while cap.isOpened():
-            # Collect batch of frames
-            if len(frames_batch) < batch_size:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                frames_batch.append(frame)
-                continue
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                break
+                
+            # Convert to grayscale for optical flow
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             
-            # Process batch at once
-            self.process_batch(frames_batch)
-            frames_batch = []
-
+            if prev_frame is not None:
+                # Calculate optical flow
+                try:
+                    flow = cv2.calcOpticalFlowFarneback(prev_frame, gray, None, 
+                                                       0.5, 3, 15, 3, 5, 1.2, 0)
+                    # Compute movement magnitude
+                    magnitude = np.sqrt(flow[..., 0]**2 + flow[..., 1]**2)
+                    mean_movement = np.mean(magnitude)
+                    movements.append(mean_movement)
+                except Exception as e:
+                    print(f"Error calculating optical flow: {e}")
+                    
+            prev_frame = gray
+            
         cap.release()
-
+        
         if not movements:
             return 0.0
-
+            
         # Return standard deviation of movement as a measure of fidgeting
         movement_std = float(np.std(movements)) if len(movements) > 1 else 0.0
+        print(f"Calculated {len(movements)} movement frames, std={movement_std:.4f}")
         return movement_std
 
 

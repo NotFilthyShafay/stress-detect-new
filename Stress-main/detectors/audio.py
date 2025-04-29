@@ -89,8 +89,7 @@ class AudioNode:
             text = self.recognizer.recognize_whisper(
                 audio_data, 
                 model='small.en',
-                language="en",  # Add language hint for speedup
-                translate=False  # Disable translation for speedup
+                language="en"  # Add language hint for speedup
             )
         else:
             text = ''
@@ -211,6 +210,7 @@ class AudioNode:
             speech_rate = num_words / duration  # Calculate speech rate
 
         return self.get_avg_emotions(), speech_rate, text
+
     def process(self, video_path: str) -> Dict[str, float]:
         """
         Wrapper for the audio node to extract and format audio features.
@@ -219,13 +219,23 @@ class AudioNode:
             A dictionary of features with keys suffixed by '_audio'.
         """
         avg_emotions, speech_rate, _ = self.analyze(video_path)
-        
-        # Format features
-        features = {f"{k}_audio": v for k, v in avg_emotions.items()}
-        features["speech_rate_audio"] = speech_rate  # Optional: add speech rate
-
-        return features
-
+        expected = [
+            "sadness_audio_audio", "joy_audio_audio", "love_audio_audio", "anger_audio_audio",
+            "fear_audio_audio", "surprise_audio_audio", "speech_rate_audio_audio"
+        ]
+        # Map your emotion keys to the expected ones if needed
+        emotion_map = {
+            "sadness": "sadness_audio_audio",
+            "joy": "joy_audio_audio",
+            "love": "love_audio_audio",
+            "anger": "anger_audio_audio",
+            "fear": "fear_audio_audio",
+            "surprise": "surprise_audio_audio"
+        }
+        features = {emotion_map[k]: avg_emotions.get(k, 0.0) for k in emotion_map}
+        features["speech_rate_audio_audio"] = speech_rate
+        # Ensure all expected keys are present
+        return {k: float(features.get(k, 0.0)) for k in expected}
 
 
 if __name__ == '__main__':
