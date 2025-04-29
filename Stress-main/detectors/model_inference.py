@@ -387,10 +387,13 @@ def main():
         inference_time = end_time - start_time
     
         # Print results
-        print(f"\nPrediction result: {result}")
-        print(f"Total inference time: {inference_time:.2f} seconds")    
-        # Print the result
+        print(f"Total inference time: {inference_time:.2f} seconds")
+        # Always print the result with the special marker for parsing
+        print(f"RESULT_JSON: {json.dumps(result)}") 
+        
+        # Print results
         if not args.quiet:
+            print(f"Total inference time: {inference_time:.2f} seconds")
             print(json.dumps(result, indent=2))
         
         # Save results if output path specified
