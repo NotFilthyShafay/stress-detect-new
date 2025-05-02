@@ -6,6 +6,8 @@ import json
 import logging
 from collections import OrderedDict
 import time
+import subprocess
+import tempfile
 
 # Configure logging
 logging.basicConfig(
@@ -183,6 +185,45 @@ def prepare_features(features, feature_order=None):
     return feature_values
 
 
+def convert_video_ffmpeg(input_path):
+    """Converts video to a standard MP4 format using ffmpeg."""
+    output_path = None
+    try:
+        # Create a temporary output file path
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp_f:
+            output_path = temp_f.name
+
+        # Basic ffmpeg command: convert video, copy video codec, convert audio to aac
+        command = [
+            'ffmpeg', '-y', '-i', input_path,
+            '-c:v', 'copy', '-c:a', 'aac', '-ar', '48000',
+            output_path
+        ]
+
+        logger.info(f"Running ffmpeg command: {' '.join(command)}")
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+
+        if result.returncode != 0:
+            logger.error(f"ffmpeg conversion failed for {input_path}.")
+            logger.error(f"ffmpeg stderr: {result.stderr}")
+            # Clean up failed output file
+            if output_path and os.path.exists(output_path):
+                os.unlink(output_path)
+            return None  # Indicate failure
+
+        logger.info(f"Successfully converted {input_path} to {output_path}")
+        return output_path  # Return path to the new MP4 file
+
+    except Exception as e:
+        logger.error(f"Error during ffmpeg conversion: {e}")
+        if output_path and os.path.exists(output_path):
+            try:
+                os.unlink(output_path)
+            except:
+                pass
+        return None
+
+
 def predict_stress(
     video_path, 
     model_path, 
@@ -215,6 +256,16 @@ def predict_stress(
         logger.error(f"Video file not found: {video_path}")
         raise FileNotFoundError(f"Video file not found: {video_path}")
     
+    # Attempt to convert video using ffmpeg for compatibility
+    logger.info("Attempting to convert video using ffmpeg for compatibility...")
+    converted_video_path = convert_video_ffmpeg(video_path)
+    processing_path = converted_video_path if converted_video_path else video_path  # Use converted if successful
+
+    if processing_path != video_path:
+        logger.info(f"Using converted video path for processing: {processing_path}")
+    else:
+        logger.warning(f"ffmpeg conversion failed or skipped, using original video path: {video_path}")
+
     # Load feature order
     feature_order = load_feature_order(feature_order_path)
     
@@ -225,10 +276,10 @@ def predict_stress(
     fidget_node = FidgetNode()
 
     node_outputs = {
-        "face": face_node.process(video_path),
-        "audio": audio_node.process(video_path),
-        "prosodic": prosodic_node.process(video_path),
-        "fidget": fidget_node.process(video_path)
+        "face": face_node.process(processing_path),
+        "audio": audio_node.process(processing_path),
+        "prosodic": prosodic_node.process(processing_path),
+        "fidget": fidget_node.process(processing_path)
     }
 
     # FLATTEN the nested structure
@@ -314,104 +365,52 @@ def predict_stress(
     logger.info(f"Prediction: {result['prediction']} (Label: {result['prediction_label']})")
     logger.info(f"Confidence: Stress={stress_confidence:.4f}, No Stress={no_stress_confidence:.4f}")
     logger.info(f"Features extracted: {len(feature_values)}")
-    print(json.dumps(result))  # Print a single line JSON without indentation
+
+    # Cleanup converted file
+    if converted_video_path and os.path.exists(converted_video_path):
+        try:
+            os.unlink(converted_video_path)
+            logger.info(f"Cleaned up temporary converted video: {converted_video_path}")
+        except Exception as e:
+            logger.warning(f"Could not delete temporary converted video: {e}")
+
     return result
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run stress prediction on a video file")
-    parser.add_argument("video_path", help="Path to the video file")
-    parser.add_argument(
-        "--model_path", 
-        type=str, 
-        default="models/mlp_model.pth", 
-        help="Path to the saved model (.pth file)"
-    )
-    parser.add_argument(
-        "--feature_order", 
-        type=str, 
-        default=None,
-        help="Path to JSON file with feature order (optional)"
-    )
-    parser.add_argument(
-        "--hidden_size", 
-        type=int, 
-        default=256,
-        help="Hidden layer size used in the model"
-    )
-    parser.add_argument(
-        "--depth", 
-        type=str, 
-        default="very_deep",
-        choices=["very_deep", "deep", "shallow"],
-        help="Model architecture depth"
-    )
-    parser.add_argument(
-        "--output", 
-        type=str, 
-        default=None,
-        help="Path to save prediction results as JSON"
-    )
-    parser.add_argument(
-        "--log_level", 
-        type=str, 
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Set logging level"
-    )
-    parser.add_argument(
-        "--quiet", 
-        action="store_true",
-        help="Suppress all output except final results"
-    )
+    parser = argparse.ArgumentParser(description="Predict stress from video using a multimodal MLP model.")
+    parser.add_argument("video_path", help="Path to the input video file.")
+    parser.add_argument("--model_path", required=True, help="Path to the trained model file (.pth).")
+    parser.add_argument("--feature_order", help="Path to the JSON file specifying feature order.")
+    parser.add_argument("--hidden_size", type=int, default=256, help="Hidden size of the MLP model.")
+    parser.add_argument("--depth", default='very_deep', help="Depth configuration of the MLP model.")
+    parser.add_argument("--quiet", action='store_true', help="Suppress detailed JSON output to stdout (only print final result).")
+
     args = parser.parse_args()
-    
-    # Set logging level
-    if args.quiet:
-        logger.setLevel(logging.ERROR)
-    else:
-        logger.setLevel(getattr(logging, args.log_level))
-    
+
+    start_time = time.time()
+
     try:
-        # Run prediction
-        start_time = time.time()
-        result = predict_stress(
+        prediction_result = predict_stress(
             args.video_path,
             args.model_path,
             args.feature_order,
             args.hidden_size,
             args.depth,
-            args.quiet
+            silent=args.quiet
         )
-        end_time = time.time()
-        inference_time = end_time - start_time
-    
-        # Print results
-        print(f"Total inference time: {inference_time:.2f} seconds")
-        # Always print the result with the special marker for parsing
-        print(f"RESULT_JSON: {json.dumps(result)}") 
-        
-        # Print results
-        if not args.quiet:
-            print(f"Total inference time: {inference_time:.2f} seconds")
-            print(json.dumps(result, indent=2))
-        
-        # Save results if output path specified
-        if args.output:
-            os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
-            with open(args.output, "w") as f:
-                json.dump(result, f, indent=2)
-            if not args.quiet:
-                logger.info(f"Results saved to: {args.output}")
-        
-        return result
-    
+        inference_time = time.time() - start_time
+
+        print(f"RESULT_JSON:{json.dumps(prediction_result)}")
+
     except Exception as e:
-        logger.error(f"Error during prediction: {str(e)}")
-        if not args.quiet:
-            import traceback
-            traceback.print_exc()
-        return {"error": str(e)}
+        error_result = {
+            "error": f"Model inference failed: {str(e)}",
+            "prediction": "unknown",
+            "stress_confidence": 0.5,
+            "no_stress_confidence": 0.5
+        }
+        print(f"RESULT_JSON:{json.dumps(error_result)}")
 
 
 if __name__ == "__main__":
